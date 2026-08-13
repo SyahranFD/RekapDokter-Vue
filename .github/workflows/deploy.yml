@@ -1,0 +1,66 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
+          script: |
+            set -e
+            DOMAIN=rekapdokter.syahranfd.cloud
+            APP_DIR=/var/www/rekapdokter
+
+            mkdir -p /root/.ssh
+            cat > /root/.ssh/rekapdokter_deploy_key <<'KEYEOF'
+            ${{ secrets.GIT_DEPLOY_KEY }}
+            KEYEOF
+            chmod 600 /root/.ssh/rekapdokter_deploy_key
+            export GIT_SSH_COMMAND="ssh -i /root/.ssh/rekapdokter_deploy_key -o StrictHostKeyChecking=accept-new"
+
+            EXPECTED_REMOTE="git@github.com:SyahranFD/RekapDokter-Vue.git"
+            if [ ! -d "$APP_DIR/.git" ] || [ "$(git -C "$APP_DIR" remote get-url origin 2>/dev/null)" != "$EXPECTED_REMOTE" ]; then
+              rm -rf "$APP_DIR"
+              git clone "$EXPECTED_REMOTE" "$APP_DIR"
+            fi
+            cd "$APP_DIR"
+            git pull
+            npm ci
+            npm run build
+
+            if [ ! -f /etc/nginx/sites-available/$DOMAIN ]; then
+              cat > /etc/nginx/sites-available/$DOMAIN <<NGINX
+            server {
+                listen 80;
+                server_name $DOMAIN;
+                root $APP_DIR/dist;
+                index index.html;
+                location / {
+                    try_files \$uri \$uri/ /index.html;
+                }
+                location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)\$ {
+                    expires 30d;
+                    add_header Cache-Control "public, no-transform";
+                }
+                location ~ /\.(?!well-known) {
+                    deny all;
+                }
+            }
+            NGINX
+              ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
+              nginx -t
+              systemctl reload nginx
+            fi
+
+            if [ ! -d /etc/letsencrypt/live/$DOMAIN ]; then
+              certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m fadhilrafa1@gmail.com --redirect
+            fi
